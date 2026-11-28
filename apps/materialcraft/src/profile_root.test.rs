@@ -197,6 +197,31 @@ fn linux_fences_app_xdg_subtrees_but_allows_launcher_sibling() {
 }
 
 #[test]
+fn nightly_profile_reopens_after_saving_settings_and_session_state() {
+    let fixture = Fixture::new();
+    for platform in [Platform::Mac, Platform::Linux, Platform::Windows] {
+        let private = fixture.root.join(format!("nightly-reopen-{platform:?}"));
+        assert_eq!(fixture.check(platform, &private).unwrap(), private);
+        for name in ["app.ron", "nightly-session.lock", "nightly-session.json"] {
+            std::fs::write(private.join(name), b"saved profile data").unwrap();
+        }
+        for name in PROFILE_FOLDERS {
+            std::fs::create_dir(private.join(name)).unwrap();
+        }
+        assert_eq!(fixture.check(platform, &private).unwrap(), private);
+        assert_eq!(std::fs::read(private.join("app.ron")).unwrap(), b"saved profile data");
+        for name in PROFILE_FOLDERS {
+            let path = private.join(name);
+            std::fs::remove_dir(&path).unwrap();
+            std::fs::write(&path, b"not a directory").unwrap();
+            assert!(fixture.check(platform, &private).is_err(), "{name} must stay a directory");
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+        }
+    }
+}
+
+#[test]
 fn mac_fences_only_app_library_subtrees_and_the_entire_bundle() {
     let mut fixture = Fixture::new();
     fixture.exe = fixture.root.join("install/MaterialCraft Nightly.app/Contents/MacOS/MaterialCraft");

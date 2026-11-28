@@ -13,6 +13,8 @@ const USER_DATA_DIR: &str = "MaterialCraft";
 /// The private recovery folder inside the nightly profile (the same name the stable app's autosave
 /// folder takes under its Documents folder).
 const RECOVERY: &str = materialcraft_ui_egui::data_root::RECOVERY;
+/// Known folder-only entries directly inside the nightly profile.
+const PROFILE_FOLDERS: [&str; 2] = [RECOVERY, "cache"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Platform {
@@ -163,6 +165,12 @@ fn private_subdirectory(root: &Path, name: impl AsRef<Path>, label: &str) -> Res
     if child == chosen || !child.starts_with(&chosen) {
         return Err(format!("the nightly {label} must stay inside its selected profile"));
     }
+    match std::fs::metadata(&child) {
+        Ok(metadata) if !metadata.is_dir() => return Err(format!("the nightly {label} must be a directory")),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("cannot inspect the nightly {label}: {error}")),
+    }
     Ok(child)
 }
 
@@ -176,11 +184,56 @@ fn entries_stay_inside(root: &Path) -> Result<(), String> {
     };
     for entry in entries {
         let entry = entry.map_err(|e| format!("cannot inspect the nightly profile: {e}"))?;
-        private_subdirectory(root, entry.file_name(), "profile entry")?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|e| format!("cannot inspect the nightly profile: {e}"))?;
+        // Settings and session state are ordinary files, not directories. Keep the existing
+        // directory-boundary check for folders (including the known folder-only entries).
+        let folder_only = PROFILE_FOLDERS.iter().any(|name| entry.file_name().eq_ignore_ascii_case(name));
+        if metadata.is_file() && !folder_only {
+            private_regular_file(&path, &metadata)?;
+        } else {
+            private_subdirectory(root, entry.file_name(), "profile entry")?;
+        }
     }
     // The preview cache is the one nested destination Nightly writes and clears on its own: a link
     // at cache/previews would put its thumbnails in, and clear, the stable app's cache instead.
     private_subdirectory(root, std::path::Path::new("cache").join("previews"), "preview cache")?;
+    Ok(())
+}
+
+/// Persisted files must have their own ordinary file identity, not an alias to other data.
+fn private_regular_file(path: &Path, metadata: &std::fs::Metadata) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.nlink() != 1 {
+            return Err("the nightly profile file must not be shared".into());
+        }
+    }
+    #[cfg(windows)]
+    {
+        use winsafe::{HFILE, co};
+        let (file, _) = HFILE::CreateFile(
+            path.to_str().ok_or("the nightly profile file path is not textual")?,
+            co::GENERIC::default(),
+            Some(co::FILE_SHARE::READ | co::FILE_SHARE::WRITE | co::FILE_SHARE::DELETE),
+            None,
+            co::DISPOSITION::OPEN_EXISTING,
+            co::FILE_ATTRIBUTE::NORMAL,
+            Some(co::FILE_FLAG::OPEN_REPARSE_POINT),
+            None,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+        let info = file.GetFileInformationByHandle().map_err(|e| e.to_string())?;
+        if info.dwFileAttributes.has(co::FILE_ATTRIBUTE::REPARSE_POINT | co::FILE_ATTRIBUTE::DIRECTORY) {
+            return Err("the nightly profile file must not be an alias or directory".into());
+        }
+        if info.nNumberOfLinks != 1 {
+            return Err("the nightly profile file must not be shared".into());
+        }
+    }
+    let _ = (path, metadata);
     Ok(())
 }
 
